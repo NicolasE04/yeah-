@@ -1,0 +1,77 @@
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+volatile int overflow3 = 0;
+volatile int overflow4 = 0;
+
+int main(void)
+{
+	// PB4 PB3 PB2 output
+	DDRB |= (1 << DDB4) | (1 << DDB3) | (1 << DDB2);
+	
+	// TIMER0 Normal mode - no interrupt
+	int t0_Bot = 225; // 0.125
+	int t0_count = 0; 
+	TCCR0A = 0x00; // Normal mode
+	TCNT0 = t0_Bot;
+	TCCR0B = (1 << CS01) | (1 << CS00); // prescaler 64
+
+	// TIMER3 CTC mode - interrupt
+	TCCR3A = 0x00;
+	TCCR3B = (1 << WGM32) | (1 << CS30); // CTC prescaler 1
+	OCR3A = 4000; // 0.25 ms
+	TCNT3 = 0;
+	TIMSK3 |= (1 << OCIE3A);
+
+	//TIMER4 Normal - overflow interrupt
+	TCCR4A = 0x00;
+	TCCR4B = (1 << CS40); // prescaler 1
+	TCNT4 = 63936; // 0.1 ms
+	TIMSK4 |= (1 << TOIE4);
+
+	sei(); // Enable global interrupts
+
+	while (1)
+	{
+		// Timer0 
+		if (TIFR0 & (1 << TOV0)) {
+			TCNT0 = t0_Bot;
+			TIFR0 |= (1 << TOV0); // Clear overflow flag
+			t0_count++;
+		}
+
+		if (t0_count >= 12000) // 1.5 sec
+		{
+			PORTB ^= (1 << PB4);
+			t0_count = 0;
+		}
+
+		//Timer3
+		if (overflow3 >= 8000) // 2 sec
+		{
+			PORTB ^= (1 << PB3);
+			overflow3 = 0;
+		}
+
+		//Timer4
+		if (overflow4 >= 10000) // 1 sec
+		{
+			PORTB ^= (1 << PB2);
+			overflow4 = 0;
+		}
+	}
+}
+
+// Timer3
+ISR(TIMER3_COMPA_vect)
+{
+	overflow3++;
+}
+
+// Timer4
+ISR(TIMER4_OVF_vect)
+{
+	TCNT4 = 63936;
+	overflow4++;
+}
