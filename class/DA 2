@@ -1,0 +1,171 @@
+//task 2
+
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+
+void delay_150ms() {
+	TCCR1A = 0;
+	TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // CTC, prescaler 1024
+	OCR1A = 2344;
+	TCNT1 = 0;
+	TIFR1 |= (1 << OCF1A); // clear flag
+	while (!(TIFR1 & (1 << OCF1A))); // wait for compare match
+}
+
+
+void delay_1500ms() {
+	for (int i = 0; i < 10; i++) {
+		delay_150ms();
+	}
+}
+
+int main(void) {
+	DDRB |= (1 << PB4);  // PB5 as output
+	DDRC &= ~(1 << PC1); // PC1 as input
+	PORTC |= (1 << PC1); // Enable pull-up on PC1
+	while (1) {
+		if (!(PINC & (1 << PC1))) { // Active low (button pressed)
+			PORTB = (1 << PB4);
+			delay_1500ms();
+			PORTB = ~(1 << PB4);
+		}
+	}
+}
+
+
+
+
+// task 3
+
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+// 150 ms delay using Timer1
+void delay_150ms() {
+	TCCR1A = 0;
+	TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // CTC, prescaler 1024
+	OCR1A = 2344; // (0.15s * 16MHz / 1024) ≈ 2344
+	TCNT1 = 0;
+	TIFR1 |= (1 << OCF1A); // Clear compare match flag
+	while (!(TIFR1 & (1 << OCF1A))); // Wait for compare
+}
+
+// 3 seconds = 20 × 0.15s
+void delay_3000ms() {
+	for (int i = 0; i < 20; i++) {
+		delay_150ms();
+	}
+}
+
+// Flag for interrupt
+volatile uint8_t led_triggered = 0;
+
+// INT0 interrupt: trigger on rising edge
+ISR(INT0_vect) {
+	led_triggered = 1;
+}
+
+int main(void) {
+	// PB5 as output (LED)
+	DDRB |= (1 << PB3);
+	PORTB &= ~(1 << PB3); // Ensure off at start
+
+	// PD2 (INT0) as input
+	DDRD &= ~(1 << PD2);
+	PORTD |= (1 << PD2); // Enable pull-up
+
+	// Enable INT0 on rising edge
+	EICRA |= (1 << ISC01) | (1 << ISC00); // Rising edge
+	EIMSK |= (1 << INT0); // Enable INT0
+	sei(); // Global interrupt enable
+
+	while (1) {
+		
+		if (led_triggered) {
+			led_triggered = 0;
+			PORTB |= (1 << PB3);
+			delay_3000ms();
+			PORTB &= ~(1 << PB3);
+		}
+	}
+}
+
+// task 2 & 3
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+
+// 150 ms delay using Timer1
+void delay_150ms() {
+	TCCR1A = 0;
+	TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // CTC, prescaler 1024
+	OCR1A = 2344; // (0.15s * 16MHz / 1024) ≈ 2344
+	TCNT1 = 0;
+	TIFR1 |= (1 << OCF1A); // Clear compare match flag
+	while (!(TIFR1 & (1 << OCF1A))); // Wait for compare
+}
+
+// 1.5 seconds = 10 × 150ms
+void delay_1500ms() {
+	for (int i = 0; i < 10; i++) {
+		delay_150ms();
+	}
+}
+
+// 3 seconds = 20 × 150ms
+void delay_3000ms() {
+	for (int i = 0; i < 20; i++) {
+		delay_150ms();
+	}
+}
+
+// Task 3 flag
+volatile uint8_t led_triggered = 0;
+
+// Task 3 INT0 
+ISR(INT0_vect) {
+	led_triggered = 1;
+}
+
+int main(void) {
+	// Task 2: PB4
+	DDRB |= (1 << PB4);
+	PORTB &= ~(1 << PB4); 
+
+	// Task 2: PC1 pull-up
+	DDRC &= ~(1 << PC1);
+	PORTC |= (1 << PC1);
+
+	// Task 3: PB3 
+	DDRB |= (1 << PB3);
+	PORTB &= ~(1 << PB3); 
+
+	// Task 3: PD2 (INT0) pull-up
+	DDRD &= ~(1 << PD2);
+	PORTD |= (1 << PD2);
+
+	// Enable INT0 on rising edge
+	EICRA |= (1 << ISC01) | (1 << ISC00); // Rising edge
+	EIMSK |= (1 << INT0); // Enable INT0
+	sei(); // Global interrupt enable
+
+	while (1) {
+		// Task 2
+		if (!(PINC & (1 << PC1))) {
+			PORTB |= (1 << PB4); 
+			delay_1500ms();
+			PORTB &= ~(1 << PB4); 
+		}
+
+		// Task 3 INT0 flag
+		if (led_triggered) {
+			led_triggered = 0;
+			PORTB |= (1 << PB3); 
+			delay_3000ms();
+			PORTB &= ~(1 << PB3); 
+		}
+	}
+}
+
