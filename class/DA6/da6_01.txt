@@ -1,0 +1,125 @@
+#define F_CPU 16000000UL
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define BAUDRATE 9600
+#define BAUD_PRESCALLER (((F_CPU / (BAUDRATE * 16UL))) - 1)
+#define Trigger_pin PB1  // Trigger pin
+#define Echo_pin    PB0  // Echo input pin
+
+#define PWM_MIN 133   // 0 deg
+#define PWM_MAX 625   // 180 deg
+
+volatile uint16_t overflow_count = 0;
+
+char buffer[32];
+
+// === UART Setup ===
+void USART_init(void) {
+	UBRR0H = (uint8_t)(BAUD_PRESCALLER >> 8);
+	UBRR0L = (uint8_t)(BAUD_PRESCALLER);
+	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+	UCSR0C = (3 << UCSZ00);
+}
+
+void USART_send(unsigned char data) {
+	while (!(UCSR0A & (1 << UDRE0)));
+	UDR0 = data;
+}
+
+void USART_putstring(char* str) {
+	while (*str) {
+		USART_send(*str++);
+	}
+}
+
+// === Timer2-based delay ===
+void timer2_init() {
+	TCCR2A = 0;
+	TCCR2B = (1 << CS22); // Prescaler 8 (0.5us per tick)
+}
+
+ISR(TIMER2_OVF_vect) {
+	overflow_count++;
+}
+
+double measure_distance_mm() {
+	uint16_t pulse_width = 0;
+	double distance;
+
+	// Trigger pulse
+	PORTB |= (1 << Trigger_pin);
+	_delay_us(10);
+	PORTB &= ~(1 << Trigger_pin);
+
+	// Wait for echo to go high
+	uint16_t timeout = 60000;
+	while (!(PINB & (1 << Echo_pin)) && --timeout);
+	if (timeout == 0) return -1;  // timeout
+
+	// Start counting
+	TCNT2 = 0;
+	overflow_count = 0;
+	TIFR2 |= (1 << TOV2);     // Clear any pending overflow
+	TIMSK2 |= (1 << TOIE2);   // Enable overflow interrupt
+
+	// Wait for echo to go low
+	timeout = 60000;
+	while ((PINB & (1 << Echo_pin)) && --timeout);
+	if (timeout == 0) return -1;  // timeout
+
+	TIMSK2 &= ~(1 << TOIE2);  // Disable overflow interrupt
+
+	pulse_width = TCNT2 + (overflow_count * 256UL);
+
+	// Convert to cm (sound speed: 343 m/s)
+	distance = pulse_width * 64.0 / (58.0 * 16.0);  // 64 prescaler, 16 MHz
+
+	return distance * 10;  // in mm
+}
+
+uint16_t angle_to_pwm(uint8_t angle) {
+	return PWM_MIN + ((uint32_t)angle * (PWM_MAX - PWM_MIN)) / 180;
+}
+
+int main(void) {
+	DDRB |= (1 << Trigger_pin) | (1 << PB2); // Trigger and PWM output
+	DDRB &= ~(1 << PB0);  // Echo input
+
+	USART_init();
+	timer2_init();
+	
+	// === Timer1 for PWM Servo Control ===
+	TCCR1A = (1 << COM1B1) | (1 << WGM11);
+	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11) | (1 << CS10);
+	ICR1 = 4999; // 20ms period
+	
+	sei();
+	_delay_ms(1000);
+
+	while (1) {
+		// CW Sweep
+		for (uint8_t angle = 0; angle <= 180; angle += 2) {
+			OCR1B = angle_to_pwm(angle);
+			_delay_ms(300);
+
+			uint16_t distance = measure_distance_mm();
+			sprintf(buffer, "%d, %d\n", angle, distance);
+			USART_putstring(buffer);
+		}
+
+		// CCW Sweep
+		for (int angle = 180; angle >= 0; angle -= 2) {
+			OCR1B = angle_to_pwm(angle);
+			_delay_ms(300);
+
+			uint16_t distance = measure_distance_mm();
+			sprintf(buffer, "%d, %d\n", angle, distance);
+			USART_putstring(buffer);
+		}
+	}
+}

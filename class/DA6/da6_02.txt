@@ -1,0 +1,200 @@
+#define F_CPU 16000000UL
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define BAUDRATE 9600
+#define BAUD_PRESCALLER (((F_CPU / (BAUDRATE * 16UL))) - 1)
+
+#define Trigger_port PORTD
+#define Trigger_ddr DDRD
+#define Trigger_pin PD4     // NEW: Ultrasonic Trigger
+#define Echo_pin PB0        // Ultrasonic Echo (INT0 if needed)
+
+#define PWM_MIN 133   // 0 deg
+#define PWM_MAX 625   // 180 deg
+
+#define SHIFT_REGISTER DDRB
+#define SHIFT_PORT PORTB
+#define DATA (1<<PB3) //MOSI (SI)
+#define LATCH (1<<PB2) //SS (RCK)
+#define CLOCK (1<<PB5) //SCK (SCK)
+
+volatile uint16_t overflow_count = 0;
+
+char buffer[32];
+
+
+//Segment byte maps for numbers 0 to 9 */
+const uint8_t SEGMENT_MAP[] = {0xC0, 0xF9, 0xA4, 0xB0, 0x99,
+0x92, 0x82, 0xF8, 0X80, 0X90};
+/* Byte maps to select digit 1 to 4 */
+const uint8_t SEGMENT_SELECT[] = {0xF1, 0xF2, 0xF4, 0xF8};
+
+
+void init_IO(void){
+	//Setup IO
+	SHIFT_REGISTER |= (DATA | LATCH | CLOCK); //Set control pins as outputs
+	SHIFT_PORT &= ~(DATA | LATCH | CLOCK); //Set control pins low
+}
+//Setup SPI
+void spi_init(void){
+	//Start SPI as Master
+	SPCR0 = (1 << SPE) | (1 << MSTR);
+}
+
+// Send data thru SPI
+void spi_send(uint16_t distance) {
+	uint8_t digits[4] = {
+		(distance / 1000) % 10, // Thousands place
+		(distance / 100) % 10,  // Hundreds place
+		(distance / 10) % 10,   // Tens place
+		distance % 10           // Ones place
+	};
+
+	// Loop through the 4 digits
+	for (uint8_t i = 0; i < 4; i++) {
+		// LATCH LOW (prepare to update the display)
+		PORTB &= ~(1 << PB2);
+
+		// Send the segment pattern for the current digit
+		SPDR0 = SEGMENT_MAP[digits[i]];
+
+		// Wait until SPI transmission is complete
+		while (!(SPSR0 & (1 << SPIF)));
+
+		// Send the corresponding SEGMENT_SELECT to activate the appropriate digit
+		SPDR0 = SEGMENT_SELECT[i];
+
+		// Wait until SPI transmission is complete
+		while (!(SPSR0 & (1 << SPIF)));
+
+		// LATCH HIGH (apply the updated data)
+		PORTB |= (1 << PB2);
+
+		_delay_us(100);
+	}
+}
+
+
+
+// === UART Setup ===
+void USART_init(void) {
+	UBRR0H = (uint8_t)(BAUD_PRESCALLER >> 8);
+	UBRR0L = (uint8_t)(BAUD_PRESCALLER);
+	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+	UCSR0C = (3 << UCSZ00);
+}
+
+void USART_send(unsigned char data) {
+	while (!(UCSR0A & (1 << UDRE0)));
+	UDR0 = data;
+}
+
+void USART_putstring(char* str) {
+	while (*str) {
+		USART_send(*str++);
+	}
+}
+
+// === Timer2-based delay ===
+void timer2_init() {
+	TCCR2A = 0;
+	TCCR2B = (1 << CS22); // Prescaler 64
+}
+
+ISR(TIMER2_OVF_vect) {
+	overflow_count++;
+}
+
+double measure_distance_mm() {
+	uint16_t pulse_width = 0;
+	double distance;
+
+	// Send trigger pulse
+	Trigger_port |= (1 << Trigger_pin);
+	_delay_us(10);
+	Trigger_port &= ~(1 << Trigger_pin);
+
+	// Wait for echo to go high
+	uint16_t timeout = 60000;
+	while (!(PINB & (1 << Echo_pin)) && --timeout);
+	if (timeout == 0) return -1;  // timeout
+
+	// Start timing
+	TCNT2 = 0;
+	overflow_count = 0;
+	TIFR2 |= (1 << TOV2);     // Clear any pending overflow
+	TIMSK2 |= (1 << TOIE2);   // Enable overflow interrupt
+
+	// Wait for echo to go low
+	timeout = 60000;
+	while ((PINB & (1 << Echo_pin)) && --timeout);
+	if (timeout == 0) return -1;  // timeout
+
+	TIMSK2 &= ~(1 << TOIE2);  // Disable overflow interrupt
+
+	pulse_width = TCNT2 + (overflow_count * 256UL);
+
+	// Convert to mm (speed of sound = ~343 m/s)
+	distance = pulse_width * 64.0 / (58.0 * 16.0);  // T2: 64 prescaler, F_CPU=16MHz
+
+	return distance * 10;  // in mm
+}
+
+uint16_t angle_to_pwm(uint8_t angle) {
+	return PWM_MIN + ((uint32_t)angle * (PWM_MAX - PWM_MIN)) / 180;
+}
+
+int main(void) {
+	// Setup I/O
+	DDRB |= (1 << PB1);                 // PB1 = OC1A = PWM output
+	DDRB &= ~(1 << Echo_pin);           // PB0 = Echo input
+	Trigger_ddr |= (1 << Trigger_pin);  // PD4 = Trigger output
+
+	USART_init();
+	timer2_init();
+	init_IO();
+	spi_init();
+
+	// Timer1 Setup for Servo PWM on OC1A (PB1)
+	TCCR1A = (1 << COM1A1) | (1 << WGM11);
+	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1<<CS11) |(1 << CS10); // Prescaler 8
+	ICR1 = 4999; // 20ms PWM period
+
+	sei();
+	_delay_ms(1000);
+	uint16_t min_distance = 10000;
+
+
+	while (1) {
+		// CW Sweep
+		for (uint8_t angle = 0; angle <= 180; angle += 2) {
+			OCR1A = angle_to_pwm(angle);
+			_delay_ms(300);
+
+			uint16_t distance = measure_distance_mm();
+			sprintf(buffer, "%d, %d\n", angle, distance);
+			USART_putstring(buffer);
+			spi_send(distance);
+			
+		}
+
+		// CCW Sweep
+		for (int angle = 180; angle >= 0; angle -= 2) {
+			OCR1A = angle_to_pwm(angle);
+			_delay_ms(300);
+
+			uint16_t distance = measure_distance_mm();
+			sprintf(buffer, "%d, %d\n", angle, distance);
+			USART_putstring(buffer);
+			if (distance < min_distance) {
+				min_distance = distance;
+			}
+			spi_send(min_distance);
+		}
+	}
+}
