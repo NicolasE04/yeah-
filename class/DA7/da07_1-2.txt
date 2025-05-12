@@ -1,0 +1,94 @@
+#define F_CPU 16000000UL
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include <math.h>
+#include <inttypes.h>
+#include <stdlib.h>   // for dtostrf()
+
+// your drivers
+#include "bmi160.h"
+#include "i2c.h"
+
+
+// filter constants
+#define ACCELEROMETER_SENSITIVITY 16384.0f
+#define GYROSCOPE_SENSITIVITY     16.4f
+#define DT                        0.01f  // 10 ms
+
+int16_t accData[3], gyrData[3];
+volatile float pitch = 0.0f, roll = 0.0f, yaw = 0.0f;
+
+
+void uart_init() {
+	unsigned int ubrr = 16; // 57600 baud @ 16MHz
+	UBRR0H = (unsigned char)(ubrr>>8);
+	UBRR0L = (unsigned char)ubrr;
+	UCSR0B = (1<<TXEN0);
+	UCSR0C = (1<<UCSZ01)|(1<<UCSZ00);
+}
+
+void uart_send(char data) {
+	while (!(UCSR0A & (1<<UDRE0)));
+	UDR0 = data;
+}
+
+void uart_print(char* str) {
+	while (*str) {
+		uart_send(*str++);
+	}
+}
+
+int main(void) {
+	char buf[80];
+
+	// init hardware
+	i2c_init();
+	bmi160_init();
+	uart_init();
+	uart_print("Starting BMI160 + Complementary Filter\r\n");
+
+	while (1) {
+		// 1) read raw sensor
+		bmi160_read_accel(&accData[0], &accData[1], &accData[2]);
+		bmi160_read_gyro (&gyrData[0], &gyrData[1], &gyrData[2]);
+
+
+		// 3) complementary filter
+		// integrate gyro → angles
+		pitch += ((float)gyrData[0] / GYROSCOPE_SENSITIVITY) * DT;
+		roll  -= ((float)gyrData[1] / GYROSCOPE_SENSITIVITY) * DT;
+		yaw   += ((float)gyrData[2] / GYROSCOPE_SENSITIVITY) * DT;
+
+		// accelerometer “trust” check
+		{
+			int32_t forceMag =
+			abs(accData[0]) + abs(accData[1]) + abs(accData[2]);
+			if (forceMag > 8192 && forceMag < 32768) {
+				float pitchAcc =
+				atan2f((float)accData[1], (float)accData[2]) * 180.0f / M_PI;
+				float rollAcc  =
+				atan2f((float)accData[0], (float)accData[2]) * 180.0f / M_PI;
+				// fuse
+				pitch = pitch * 0.98f + pitchAcc * 0.02f;
+				roll  = roll  * 0.98f + rollAcc  * 0.02f;
+			}
+		}
+
+		char f1[8], f2[8], f3[8];
+		dtostrf(pitch, 6, 2, f1);
+		dtostrf(roll,  6, 2, f2);
+		dtostrf(yaw,   6, 2, f3);
+
+		char sbuf[128];
+		snprintf(sbuf, sizeof(sbuf),
+		"%d,%d,%d,%d,%d,%d,%s,%s,%s\r\n",
+		accData[0], accData[1], accData[2],
+		gyrData[0], gyrData[1], gyrData[2],
+		f1, f2, f3);
+		uart_print(sbuf);
+		
+		// 5) wait ~10 ms
+		_delay_ms(500);
+	}
+}
